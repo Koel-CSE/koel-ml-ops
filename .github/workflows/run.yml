@@ -1,0 +1,84 @@
+# Scheduled ops runner. Deliberately minimal — everything this actually
+# does lives in a private repository and is fetched at run time via a
+# scoped token; nothing about it is visible here beyond "something runs
+# daily." Real command output is redirected to local files inside that
+# private checkout and is never printed to this job's log or uploaded
+# anywhere from this repo.
+name: run
+
+on:
+  workflow_dispatch:
+    inputs:
+      opt_a:
+        description: "a"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      opt_b:
+        description: "b"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      opt_c:
+        description: "c"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      opt_d:
+        description: "d"
+        required: false
+        default: "hpe_with_ltr_fallback"
+        type: choice
+        options:
+          - hpe_with_ltr_fallback
+          - gated_ltr
+          - hpe_with_fallback
+          - gated_p90
+          - gated
+          - always_on
+  schedule:
+    - cron: "30 10 * * *"
+
+concurrency:
+  group: run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: "1"
+        run: |
+          git clone --depth 1 "https://x-access-token:${KOEL_REPO_PAT}@github.com/${KOEL_TARGET_REPO}.git" src > /dev/null 2>&1
+          echo ok
+        env:
+          KOEL_REPO_PAT: ${{ secrets.KOEL_REPO_PAT }}
+          KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: "2"
+        working-directory: src
+        run: |
+          pip install -e ".[dev,ml]" > /dev/null 2>&1 && echo ok
+
+      - name: "3"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ML_LTR_SERVE: ${{ vars.ML_LTR_SERVE || '1' }}
+          CSE_MIN_INTERVAL_SECONDS: "0.2"
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_RETRAIN: ${{ github.event.inputs.opt_a || '' }}
+          RUN_LTR_SHIP: ${{ github.event.inputs.opt_b || '' }}
+          RUN_FORECAST: ${{ github.event.inputs.opt_c || '' }}
+          FORECAST_MODE: ${{ github.event.inputs.opt_d || 'hpe_with_ltr_fallback' }}
+          COPILOT_TASK_PAT: ${{ secrets.COPILOT_TASK_PAT }}
+          KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+        run: bash scripts/ci_ml_self_learn.sh
