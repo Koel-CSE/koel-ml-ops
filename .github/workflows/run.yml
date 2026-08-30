@@ -88,3 +88,9 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: bash scripts/ci_resolve_verdicts.sh
+
+      - name: "5"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: bash scripts/ci_signal_ic_report.sh
