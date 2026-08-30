@@ -82,3 +82,9 @@ jobs:
           COPILOT_TASK_PAT: ${{ secrets.COPILOT_TASK_PAT }}
           KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
         run: bash scripts/ci_ml_self_learn.sh
+
+      - name: "4"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: bash scripts/ci_resolve_verdicts.sh
