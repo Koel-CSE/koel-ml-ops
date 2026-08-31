@@ -61,16 +61,20 @@ jobs:
           AI_BACKUP_PROVIDERS: ${{ secrets.AI_BACKUP_PROVIDERS }}
           AI_BACKUP_API_KEYS: ${{ secrets.AI_BACKUP_API_KEYS }}
           AI_BACKUP_MODELS: ${{ secrets.AI_BACKUP_MODELS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: bash scripts/ci_hourly_batch.sh
 
       - name: "5"
         working-directory: src
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          KOEL_OPS_TELEGRAM_ID: ${{ secrets.KOEL_OPS_TELEGRAM_ID }}
         run: bash scripts/ci_watchdog.sh
 
       - name: "6"
         working-directory: src
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: bash scripts/ci_ops_digest.sh
