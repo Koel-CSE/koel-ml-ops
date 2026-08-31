@@ -1,0 +1,76 @@
+# Scheduled ops runner, second instance — same pattern as run.yml
+# (deliberately minimal; real logic lives in the private repo, fetched at
+# run time via a scoped token; nothing about it is visible here beyond
+# "something runs hourly"). Separate file because this one needs an
+# hourly trigger, and bolting that onto run.yml would also run its
+# ml-self-learn step (15-18 min) 24x/day instead of once.
+name: run2
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "20 * * * *"
+
+concurrency:
+  group: run2
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: "1"
+        run: |
+          git clone --depth 1 "https://x-access-token:${KOEL_REPO_PAT}@github.com/${KOEL_TARGET_REPO}.git" src > /dev/null 2>&1
+          echo ok
+        env:
+          KOEL_REPO_PAT: ${{ secrets.KOEL_REPO_PAT }}
+          KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: "2"
+        working-directory: src
+        run: |
+          pip install -e ".[dev]" > /dev/null 2>&1 && echo ok
+
+      - name: "3"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          AI_BRIEFS_ENABLED: ${{ secrets.AI_BRIEFS_ENABLED }}
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          AI_BACKUP_PROVIDERS: ${{ secrets.AI_BACKUP_PROVIDERS }}
+          AI_BACKUP_API_KEYS: ${{ secrets.AI_BACKUP_API_KEYS }}
+          AI_BACKUP_MODELS: ${{ secrets.AI_BACKUP_MODELS }}
+        run: bash scripts/ci_daily_batch.sh
+
+      - name: "4"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          AI_BRIEFS_ENABLED: ${{ secrets.AI_BRIEFS_ENABLED }}
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          AI_BACKUP_PROVIDERS: ${{ secrets.AI_BACKUP_PROVIDERS }}
+          AI_BACKUP_API_KEYS: ${{ secrets.AI_BACKUP_API_KEYS }}
+          AI_BACKUP_MODELS: ${{ secrets.AI_BACKUP_MODELS }}
+        run: bash scripts/ci_hourly_batch.sh
+
+      - name: "5"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: bash scripts/ci_watchdog.sh
+
+      - name: "6"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: bash scripts/ci_ops_digest.sh
