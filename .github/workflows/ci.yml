@@ -157,7 +157,7 @@ jobs:
           esac
           gh api -X POST "repos/$KOEL_TARGET_REPO/statuses/$SHA" -f state="$state" \
             -f context="$CTX" -f description="${desc:0:139}" -f target_url="$RUN_URL" > /dev/null 2>&1 \
-            || echo "::warning::status post failed"
+            || true
           if [[ "$state" != success ]]; then
             {
               echo "**$CTX** $desc"
@@ -167,7 +167,7 @@ jobs:
               echo '```'
             } > "$RUNNER_TEMP/body.md"
             gh api -X POST "repos/$KOEL_TARGET_REPO/commits/$SHA/comments" \
-              -F body=@"$RUNNER_TEMP/body.md" > /dev/null 2>&1 || echo "::warning::comment post failed"
+              -F body=@"$RUNNER_TEMP/body.md" > /dev/null 2>&1 || true
           fi
           mkdir -p "$RUNNER_TEMP/marker" && echo "$state" > "$RUNNER_TEMP/marker/state"
           [[ "$state" == success ]] && echo ok || echo fail
