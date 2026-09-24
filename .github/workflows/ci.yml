@@ -74,16 +74,18 @@ jobs:
             fi
             picked+=("$FORCE_SHA")
           else
-            if ! pulls_json=$(api "repos/$KOEL_TARGET_REPO/pulls?state=open&per_page=50"); then
-              echo "::error::Cannot list pull requests in $KOEL_TARGET_REPO. Check KOEL_REPO_PAT access."
+            if ! pulls_json=$(api "repos/$KOEL_TARGET_REPO/pulls?state=open&per_page=50" 2>&1); then
+              api_message=$(jq -r '.message // empty' <<<"$pulls_json" 2>/dev/null || true)
+              echo "::error::Cannot list pull requests in $KOEL_TARGET_REPO. ${api_message:-Check KOEL_REPO_PAT access.}"
               exit 1
             fi
             if ! jq -e 'type == "array"' <<<"$pulls_json" > /dev/null; then
               echo "::error::GitHub returned an unexpected pull request response for $KOEL_TARGET_REPO."
               exit 1
             fi
-            if ! main_json=$(api "repos/$KOEL_TARGET_REPO/commits/main"); then
-              echo "::error::Cannot read main in $KOEL_TARGET_REPO. Check KOEL_TARGET_REPO and KOEL_REPO_PAT access."
+            if ! main_json=$(api "repos/$KOEL_TARGET_REPO/commits/main" 2>&1); then
+              api_message=$(jq -r '.message // empty' <<<"$main_json" 2>/dev/null || true)
+              echo "::error::Cannot read main in $KOEL_TARGET_REPO. ${api_message:-Check KOEL_TARGET_REPO and KOEL_REPO_PAT access.}"
               exit 1
             fi
             if ! main_sha=$(jq -er '.sha | select(type == "string" and test("^[0-9a-fA-F]{40}$"))' <<<"$main_json"); then
