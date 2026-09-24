@@ -72,12 +72,12 @@ jobs:
           fi
           for sha in "${picked[@]}"; do mark "$sha"; done
           echo "shas=$(jq -cn '$ARGS.positional' --args "${picked[@]}")" >> "$GITHUB_OUTPUT"
-          echo "count=${#picked[@]}"
+          echo ok
 
   check:
     needs: scan
     if: needs.scan.outputs.shas != '[]'
-    name: "${{ matrix.stage.ctx }} @ ${{ matrix.sha }}"
+    name: "c ${{ strategy.job-index }}"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -170,7 +170,7 @@ jobs:
               -F body=@"$RUNNER_TEMP/body.md" > /dev/null 2>&1 || echo "::warning::comment post failed"
           fi
           mkdir -p "$RUNNER_TEMP/marker" && echo "$state" > "$RUNNER_TEMP/marker/state"
-          echo "$state: $desc"
+          [[ "$state" == success ]] && echo ok || echo fail
           [[ "$state" == success ]]
 
       - name: "4"
