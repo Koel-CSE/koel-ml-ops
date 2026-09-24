@@ -23,7 +23,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GH_TOKEN: ${{ secrets.KOEL_STATUS_PAT || secrets.KOEL_REPO_PAT }}
+  # Prefer the repository-scoped token for API reads and git fetches. The
+  # status token may only have permission to write commit statuses.
+  GH_TOKEN: ${{ secrets.KOEL_REPO_PAT }}
+  STATUS_TOKEN: ${{ secrets.KOEL_STATUS_PAT || secrets.KOEL_REPO_PAT }}
   KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
 
 jobs:
@@ -41,6 +44,14 @@ jobs:
         run: |
           set -euo pipefail
           api() { gh api -H "Accept: application/vnd.github+json" "$@"; }
+          if [[ -z "$KOEL_TARGET_REPO" || ! "$KOEL_TARGET_REPO" =~ ^[^/]+/[^/]+$ ]]; then
+            echo "::error::KOEL_TARGET_REPO must be configured as owner/repository."
+            exit 1
+          fi
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Set KOEL_REPO_PAT to a token with contents:read access to $KOEL_TARGET_REPO."
+            exit 1
+          fi
           # Already-checked commits are remembered as cache markers in this
           # repo, so the scan works without write access to the target.
           done_before() {
@@ -50,20 +61,40 @@ jobs:
           # Optional: report back as commit statuses when the token allows.
           mark() {
             for ctx in lint-typecheck-unit migrate-and-db-tests web-lint-typecheck-smoke; do
-              api -X POST "repos/$KOEL_TARGET_REPO/statuses/$1" \
+              GH_TOKEN="$STATUS_TOKEN" api -X POST "repos/$KOEL_TARGET_REPO/statuses/$1" \
                 -f state=pending -f context="koel-ci/$ctx" -f description="queued" > /dev/null 2>&1 \
                 || return 0
             done
           }
           picked=()
           if [[ -n "$FORCE_SHA" ]]; then
+            if [[ ! "$FORCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::The requested sha must be a full 40-character commit SHA."
+              exit 1
+            fi
             picked+=("$FORCE_SHA")
           else
+            if ! pulls_json=$(api "repos/$KOEL_TARGET_REPO/pulls?state=open&per_page=50"); then
+              echo "::error::Cannot list pull requests in $KOEL_TARGET_REPO. Check KOEL_REPO_PAT access."
+              exit 1
+            fi
+            if ! jq -e 'type == "array"' <<<"$pulls_json" > /dev/null; then
+              echo "::error::GitHub returned an unexpected pull request response for $KOEL_TARGET_REPO."
+              exit 1
+            fi
+            if ! main_json=$(api "repos/$KOEL_TARGET_REPO/commits/main"); then
+              echo "::error::Cannot read main in $KOEL_TARGET_REPO. Check KOEL_TARGET_REPO and KOEL_REPO_PAT access."
+              exit 1
+            fi
+            if ! main_sha=$(jq -er '.sha | select(type == "string" and test("^[0-9a-fA-F]{40}$"))' <<<"$main_json"); then
+              echo "::error::GitHub did not return a valid main commit SHA for $KOEL_TARGET_REPO."
+              exit 1
+            fi
             heads=$(
-              { api "repos/$KOEL_TARGET_REPO/pulls?state=open&per_page=50" \
-                  -q '.[] | select(.head.repo.full_name == .base.repo.full_name) | .head.sha'
-                api "repos/$KOEL_TARGET_REPO/commits/main" -q .sha
-              } 2>/dev/null | sort -u
+              {
+                jq -r '.[] | select(.head.repo.full_name == .base.repo.full_name) | .head.sha | select(test("^[0-9a-fA-F]{40}$"))' <<<"$pulls_json"
+                printf '%s\n' "$main_sha"
+              } | sort -u
             )
             for sha in $heads; do
               if [[ "$(done_before "$sha")" == "0" ]]; then picked+=("$sha"); fi
@@ -110,11 +141,22 @@ jobs:
       - name: "1"
         run: |
           set -euo pipefail
-          gh api -X POST "repos/$KOEL_TARGET_REPO/statuses/$SHA" -f state=pending \
+          if [[ -z "$KOEL_TARGET_REPO" || ! "$KOEL_TARGET_REPO" =~ ^[^/]+/[^/]+$ ]]; then
+            echo "::error::KOEL_TARGET_REPO must be configured as owner/repository."
+            exit 1
+          fi
+          if [[ ! "$SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Refusing to fetch invalid commit SHA: $SHA"
+            exit 1
+          fi
+          GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$KOEL_TARGET_REPO/statuses/$SHA" -f state=pending \
             -f context="$CTX" -f description="running" > /dev/null 2>&1 || true
           git init -q src
           git -C src remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${KOEL_TARGET_REPO}.git"
-          git -C src fetch -q --depth 1 origin "$SHA" > /dev/null 2>&1
+          if ! git -C src fetch -q --depth 1 origin "$SHA" > /dev/null 2>&1; then
+            echo "::error::Cannot fetch $SHA from $KOEL_TARGET_REPO. Check KOEL_REPO_PAT has contents:read access and the commit exists."
+            exit 1
+          fi
           git -C src checkout -q FETCH_HEAD > /dev/null 2>&1
           git -C src remote remove origin
           echo ok
@@ -156,7 +198,7 @@ jobs:
             failure) state=failure; desc="failed at: ${last_step:-setup}" ;;
             *)       state=error;   desc="runner ${OUTCOME:-error}" ;;
           esac
-          gh api -X POST "repos/$KOEL_TARGET_REPO/statuses/$SHA" -f state="$state" \
+          GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$KOEL_TARGET_REPO/statuses/$SHA" -f state="$state" \
             -f context="$CTX" -f description="${desc:0:139}" -f target_url="$RUN_URL" > /dev/null 2>&1 \
             || true
           if [[ "$state" != success ]]; then
@@ -167,7 +209,7 @@ jobs:
               grep -v '::koel-ci-step::' "$LOG" | tail -n 80 | cut -c1-300
               echo '```'
             } > "$RUNNER_TEMP/body.md"
-            gh api -X POST "repos/$KOEL_TARGET_REPO/commits/$SHA/comments" \
+            GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$KOEL_TARGET_REPO/commits/$SHA/comments" \
               -F body=@"$RUNNER_TEMP/body.md" > /dev/null 2>&1 || true
           fi
           if [[ "$state" != success && -n "${LOG_PUBKEY:-}" ]]; then
