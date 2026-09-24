@@ -135,11 +135,11 @@ jobs:
         env:
           DATABASE_URL: ${{ matrix.stage.key == 'integration' && 'postgresql://koel:koel@localhost:5432/koel' || '' }}
         run: |
-          if [[ ! -f scripts/ci_pr_checks.sh ]]; then
-            echo "scripts/ci_pr_checks.sh not present at this commit" > "$LOG"
+          if [[ ! -f scripts/pr_checks.sh ]]; then
+            echo "scripts/pr_checks.sh not present at this commit" > "$LOG"
             exit 1
           fi
-          bash scripts/ci_pr_checks.sh "${{ matrix.stage.key }}" > "$LOG" 2>&1 && echo ok
+          bash scripts/pr_checks.sh "${{ matrix.stage.key }}" > "$LOG" 2>&1 && echo ok
 
       - name: "3"
         if: always()
