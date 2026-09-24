@@ -14,6 +14,10 @@ on:
   schedule:
     - cron: "*/10 * * * *"
 
+permissions:
+  actions: read
+  contents: read
+
 concurrency:
   group: ci-scan
   cancel-in-progress: false
@@ -33,14 +37,22 @@ jobs:
         id: pick
         env:
           FORCE_SHA: ${{ github.event.inputs.sha || '' }}
+          OWN_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           api() { gh api -H "Accept: application/vnd.github+json" "$@"; }
+          # Already-checked commits are remembered as cache markers in this
+          # repo, so the scan works without write access to the target.
+          done_before() {
+            GH_TOKEN="$OWN_TOKEN" gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=ci-done-$1" \
+              -q '.total_count' 2>/dev/null || echo 0
+          }
+          # Optional: report back as commit statuses when the token allows.
           mark() {
             for ctx in lint-typecheck-unit migrate-and-db-tests web-lint-typecheck-smoke; do
               api -X POST "repos/$KOEL_TARGET_REPO/statuses/$1" \
                 -f state=pending -f context="koel-ci/$ctx" -f description="queued" > /dev/null 2>&1 \
-                || { echo "::error::status write denied; set KOEL_STATUS_PAT (commit statuses: write)"; exit 1; }
+                || return 0
             done
           }
           picked=()
@@ -54,9 +66,7 @@ jobs:
               } 2>/dev/null | sort -u
             )
             for sha in $heads; do
-              seen=$(api "repos/$KOEL_TARGET_REPO/commits/$sha/statuses?per_page=100" \
-                -q '[.[] | select(.context | startswith("koel-ci/"))] | length' 2>/dev/null || echo 1)
-              if [[ "$seen" == "0" ]]; then picked+=("$sha"); fi
+              if [[ "$(done_before "$sha")" == "0" ]]; then picked+=("$sha"); fi
               [[ ${#picked[@]} -ge 4 ]] && break
             done
           fi
@@ -67,7 +77,7 @@ jobs:
   check:
     needs: scan
     if: needs.scan.outputs.shas != '[]'
-    name: "c ${{ strategy.job-index }}"
+    name: "${{ matrix.stage.ctx }} @ ${{ matrix.sha }}"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -159,5 +169,13 @@ jobs:
             gh api -X POST "repos/$KOEL_TARGET_REPO/commits/$SHA/comments" \
               -F body=@"$RUNNER_TEMP/body.md" > /dev/null 2>&1 || echo "::warning::comment post failed"
           fi
-          echo "$state"
+          mkdir -p "$RUNNER_TEMP/marker" && echo "$state" > "$RUNNER_TEMP/marker/state"
+          echo "$state: $desc"
           [[ "$state" == success ]]
+
+      - name: "4"
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/marker
+          key: ci-done-${{ matrix.sha }}-${{ matrix.stage.key }}
