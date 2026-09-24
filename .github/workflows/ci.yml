@@ -1,0 +1,163 @@
+# Check runner. Same pattern as run.yml: the checks themselves live in a
+# private repository and are fetched at run time via a scoped token. Command
+# output is written to a local file and never printed to this job's log;
+# results are reported back to the private repository only.
+name: ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "commit (blank = scan)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "*/10 * * * *"
+
+concurrency:
+  group: ci-scan
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ secrets.KOEL_STATUS_PAT || secrets.KOEL_REPO_PAT }}
+  KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shas: ${{ steps.pick.outputs.shas }}
+    steps:
+      - name: "1"
+        id: pick
+        env:
+          FORCE_SHA: ${{ github.event.inputs.sha || '' }}
+        run: |
+          set -euo pipefail
+          api() { gh api -H "Accept: application/vnd.github+json" "$@"; }
+          mark() {
+            for ctx in lint-typecheck-unit migrate-and-db-tests web-lint-typecheck-smoke; do
+              api -X POST "repos/$KOEL_TARGET_REPO/statuses/$1" \
+                -f state=pending -f context="koel-ci/$ctx" -f description="queued" > /dev/null 2>&1 \
+                || { echo "::error::status write denied; set KOEL_STATUS_PAT (commit statuses: write)"; exit 1; }
+            done
+          }
+          picked=()
+          if [[ -n "$FORCE_SHA" ]]; then
+            picked+=("$FORCE_SHA")
+          else
+            heads=$(
+              { api "repos/$KOEL_TARGET_REPO/pulls?state=open&per_page=50" \
+                  -q '.[] | select(.head.repo.full_name == .base.repo.full_name) | .head.sha'
+                api "repos/$KOEL_TARGET_REPO/commits/main" -q .sha
+              } 2>/dev/null | sort -u
+            )
+            for sha in $heads; do
+              seen=$(api "repos/$KOEL_TARGET_REPO/commits/$sha/statuses?per_page=100" \
+                -q '[.[] | select(.context | startswith("koel-ci/"))] | length' 2>/dev/null || echo 1)
+              if [[ "$seen" == "0" ]]; then picked+=("$sha"); fi
+              [[ ${#picked[@]} -ge 4 ]] && break
+            done
+          fi
+          for sha in "${picked[@]}"; do mark "$sha"; done
+          echo "shas=$(jq -cn '$ARGS.positional' --args "${picked[@]}")" >> "$GITHUB_OUTPUT"
+          echo "count=${#picked[@]}"
+
+  check:
+    needs: scan
+    if: needs.scan.outputs.shas != '[]'
+    name: "c ${{ strategy.job-index }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        sha: ${{ fromJSON(needs.scan.outputs.shas) }}
+        stage:
+          - { key: unit, ctx: lint-typecheck-unit }
+          - { key: integration, ctx: migrate-and-db-tests }
+          - { key: web, ctx: web-lint-typecheck-smoke }
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: koel
+          POSTGRES_PASSWORD: koel
+          POSTGRES_DB: koel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U koel -d koel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SHA: ${{ matrix.sha }}
+      CTX: koel-ci/${{ matrix.stage.ctx }}
+      LOG: /tmp/koel-c.log
+    steps:
+      - name: "1"
+        run: |
+          set -euo pipefail
+          gh api -X POST "repos/$KOEL_TARGET_REPO/statuses/$SHA" -f state=pending \
+            -f context="$CTX" -f description="running" > /dev/null 2>&1 || true
+          git init -q src
+          git -C src remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${KOEL_TARGET_REPO}.git"
+          git -C src fetch -q --depth 1 origin "$SHA" > /dev/null 2>&1
+          git -C src checkout -q FETCH_HEAD > /dev/null 2>&1
+          git -C src remote remove origin
+          echo ok
+
+      - if: matrix.stage.key != 'web'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - if: matrix.stage.key == 'web'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: "2"
+        id: run
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ matrix.stage.key == 'integration' && 'postgresql://koel:koel@localhost:5432/koel' || '' }}
+        run: |
+          if [[ ! -f scripts/ci_pr_checks.sh ]]; then
+            echo "scripts/ci_pr_checks.sh not present at this commit" > "$LOG"
+            exit 1
+          fi
+          bash scripts/ci_pr_checks.sh "${{ matrix.stage.key }}" > "$LOG" 2>&1 && echo ok
+
+      - name: "3"
+        if: always()
+        env:
+          OUTCOME: ${{ steps.run.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          touch "$LOG"
+          last_step=$(grep -o '::koel-ci-step:: .*' "$LOG" | tail -1 | sed 's/::koel-ci-step:: //')
+          case "$OUTCOME" in
+            success) state=success; desc="passed" ;;
+            failure) state=failure; desc="failed at: ${last_step:-setup}" ;;
+            *)       state=error;   desc="runner ${OUTCOME:-error}" ;;
+          esac
+          gh api -X POST "repos/$KOEL_TARGET_REPO/statuses/$SHA" -f state="$state" \
+            -f context="$CTX" -f description="${desc:0:139}" -f target_url="$RUN_URL" > /dev/null 2>&1 \
+            || echo "::warning::status post failed"
+          if [[ "$state" != success ]]; then
+            {
+              echo "**$CTX** $desc"
+              echo
+              echo '```'
+              grep -v '::koel-ci-step::' "$LOG" | tail -n 80 | cut -c1-300
+              echo '```'
+            } > "$RUNNER_TEMP/body.md"
+            gh api -X POST "repos/$KOEL_TARGET_REPO/commits/$SHA/comments" \
+              -F body=@"$RUNNER_TEMP/body.md" > /dev/null 2>&1 || echo "::warning::comment post failed"
+          fi
+          echo "$state"
+          [[ "$state" == success ]]
