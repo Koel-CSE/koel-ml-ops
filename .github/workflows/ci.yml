@@ -42,10 +42,20 @@ jobs:
           set -euo pipefail
           api() { gh api -H "Accept: application/vnd.github+json" "$@"; }
           # Already-checked commits are remembered as cache markers in this
-          # repo, so the scan works without write access to the target.
+          # repo, so the scan works without write access to the target. A
+          # partial run must not suppress the stages that never completed.
           done_before() {
-            GH_TOKEN="$OWN_TOKEN" gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=ci-done-$1" \
-              -q '.total_count' 2>/dev/null || echo 0
+            local sha="$1" stage cached_keys
+            for stage in unit integration web; do
+              cached_keys=$(GH_TOKEN="$OWN_TOKEN" gh api \
+                "repos/$GITHUB_REPOSITORY/actions/caches?key=ci-done-${sha}-${stage}" \
+                -q '.actions_caches[].key' 2>/dev/null || true)
+              if ! grep -Fxq "ci-done-${sha}-${stage}" <<< "$cached_keys"; then
+                echo 0
+                return 0
+              fi
+            done
+            echo 1
           }
           # Optional: report back as commit statuses when the token allows.
           mark() {
@@ -60,10 +70,10 @@ jobs:
             picked+=("$FORCE_SHA")
           else
             heads=$(
-              { api "repos/$KOEL_TARGET_REPO/pulls?state=open&per_page=50" \
+              { api "repos/$KOEL_TARGET_REPO/commits/main" -q .sha
+                api "repos/$KOEL_TARGET_REPO/pulls?state=open&sort=updated&direction=desc&per_page=50" \
                   -q '.[] | select(.head.repo.full_name == .base.repo.full_name) | .head.sha'
-                api "repos/$KOEL_TARGET_REPO/commits/main" -q .sha
-              } 2>/dev/null | sort -u
+              } 2>/dev/null | awk '!seen[$0]++'
             )
             for sha in $heads; do
               if [[ "$(done_before "$sha")" == "0" ]]; then picked+=("$sha"); fi
@@ -150,7 +160,9 @@ jobs:
         run: |
           set -uo pipefail
           touch "$LOG"
-          last_step=$(grep -o '::koel-ci-step:: .*' "$LOG" | tail -1 | sed 's/::koel-ci-step:: //')
+          # GitHub also starts this shell with -e. No marker is a valid
+          # setup failure, not a reason to abort reporting and diagnostics.
+          last_step=$(grep -o '::koel-ci-step:: .*' "$LOG" | tail -1 | sed 's/::koel-ci-step:: //' || true)
           case "$OUTCOME" in
             success) state=success; desc="passed" ;;
             failure) state=failure; desc="failed at: ${last_step:-setup}" ;;
@@ -164,7 +176,7 @@ jobs:
               echo "**$CTX** $desc"
               echo
               echo '```'
-              grep -v '::koel-ci-step::' "$LOG" | tail -n 80 | cut -c1-300
+              grep -v '::koel-ci-step::' "$LOG" | tail -n 80 | cut -c1-300 || true
               echo '```'
             } > "$RUNNER_TEMP/body.md"
             gh api -X POST "repos/$KOEL_TARGET_REPO/commits/$SHA/comments" \
@@ -178,11 +190,24 @@ jobs:
             echo "d1:$ek"
             echo "d2:$eb"
           fi
-          mkdir -p "$RUNNER_TEMP/marker" && echo "$state" > "$RUNNER_TEMP/marker/state"
           [[ "$state" == success ]] && echo ok || echo fail
           [[ "$state" == success ]]
 
       - name: "4"
+        if: always()
+        env:
+          OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          # Record completed checks independently of status/log reporting.
+          # Cancelled or infrastructure-skipped checks remain retryable.
+          case "$OUTCOME" in
+            success|failure)
+              mkdir -p "$RUNNER_TEMP/marker"
+              printf '%s\n' "$OUTCOME" > "$RUNNER_TEMP/marker/state"
+              ;;
+          esac
+
+      - name: "5"
         if: always()
         uses: actions/cache/save@v4
         with:
