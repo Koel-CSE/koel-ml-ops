@@ -1,0 +1,46 @@
+name: run4
+
+on:
+  workflow_dispatch:
+    inputs:
+      slot:
+        type: choice
+        default: '3'
+        options: ['1', '2', '3']
+  schedule:
+    - cron: '15 11 * * *'
+    - cron: '15 14 * * *'
+    - cron: '15 17 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run4
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: '1'
+        env:
+          KOEL_REPO_PAT: ${{ secrets.KOEL_REPO_PAT }}
+          KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+        run: |
+          git clone --depth 1 --branch cloud/neon-deno-cutover "https://x-access-token:${KOEL_REPO_PAT}@github.com/${KOEL_TARGET_REPO}.git" src > /dev/null 2>&1
+          echo ok
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: '2'
+        working-directory: src
+        run: pip install -e ".[dev,ml]" > /dev/null 2>&1 && echo ok
+      - name: '3'
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          KOEL_SIGNAL_SLOT: ${{ inputs.slot || (github.event.schedule == '15 11 * * *' && '1') || (github.event.schedule == '15 14 * * *' && '2') || '3' }}
+        run: bash scripts/ci_signals.sh
