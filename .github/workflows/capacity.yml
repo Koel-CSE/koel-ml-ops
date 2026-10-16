@@ -1,0 +1,54 @@
+# Deployed to the existing public operations runner. Keep output generic.
+name: capacity
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capacity
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: "1"
+        env:
+          KOEL_REPO_PAT: ${{ secrets.KOEL_REPO_PAT }}
+          KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+          SOURCE_REF: ${{ vars.CAPACITY_SOURCE_REF || 'main' }}
+        run: |
+          git clone --depth 1 --branch "$SOURCE_REF" "https://x-access-token:${KOEL_REPO_PAT}@github.com/${KOEL_TARGET_REPO}.git" src > /dev/null 2>&1
+          echo ok
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: /tmp/capacity-state
+          key: capacity-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: capacity-v1-
+
+      - name: "2"
+        working-directory: src
+        env:
+          NEON_FLEET_API_KEYS: ${{ secrets.NEON_FLEET_API_KEYS }}
+        run: |
+          python -m koel.neon_fleet status \
+            --config config/neon-fleet.json \
+            --notification-state /tmp/capacity-state/fingerprint \
+            --public-summary
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: /tmp/capacity-state
+          key: capacity-v1-${{ github.run_id }}-${{ github.run_attempt }}
