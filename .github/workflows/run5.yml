@@ -12,7 +12,7 @@ on:
         required: false
         default: "a"
         type: choice
-        options: ["a", "b", "c"]
+        options: ["a", "b", "c", "d"]
       x:
         description: "x"
         required: false
@@ -23,13 +23,20 @@ on:
         required: false
         default: ""
         type: string
+  # GitHub drops/delays most cron fires on this repo (15-min crons fire every
+  # ~2-3h), so one fire starts a session-long loop (mode d) instead of relying
+  # on many short runs. Several fires as backups; extras queue and no-op.
   schedule:
-    - cron: "*/15 4-8 * * 1-5"
-    - cron: "0 9 * * 1-5"
-    - cron: "30 9 * * 1-5"
+    - cron: "50 3 * * 1-5"
+    - cron: "20 4 * * 1-5"
+    - cron: "0 5 * * 1-5"
+    - cron: "0 6 * * 1-5"
+    - cron: "0 7 * * 1-5"
+    - cron: "0 8 * * 1-5"
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: run5
@@ -38,7 +45,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 345
     steps:
       - name: "1"
         env:
@@ -62,7 +69,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          M: ${{ inputs.m || (github.event.schedule == '30 9 * * 1-5' && 'b') || 'a' }}
+          M: ${{ inputs.m || 'd' }}
           X: ${{ inputs.x || '' }}
           Y: ${{ inputs.y || '' }}
         run: |
@@ -70,5 +77,30 @@ jobs:
             a) bash scripts/ci_prices.sh poll ;;
             b) bash scripts/ci_prices.sh eod ;;
             c) bash scripts/ci_prices.sh backfill "$X" "$Y" ;;
+            d)
+              # Market-session loop: a tick every 5 min until 14:35 SLT (09:05 UTC),
+              # then the day's EOD bars once. Single tick failures don't stop the loop.
+              end=$(date -u -d "today 09:05" +%s); n=0; bad=0
+              while [ "$(date -u +%s)" -lt "$end" ]; do
+                t0=$(date -u +%s)
+                if bash scripts/ci_prices.sh poll > /dev/null 2>&1; then :; else bad=$((bad+1)); fi
+                n=$((n+1))
+                left=$(( 300 - ( $(date -u +%s) - t0 ) )); [ "$left" -gt 0 ] && sleep "$left"
+              done
+              echo "ticks=$n failed=$bad"
+              if [ "$n" -gt 0 ]; then bash scripts/ci_prices.sh eod; fi
+              if [ "$n" -gt 0 ] && [ $((bad * 2)) -gt "$n" ]; then echo "stage 9: failed"; exit 1; fi
+              ;;
             *) echo "stage 0: failed"; exit 1 ;;
           esac
+
+      # If the loop died mid-session (runner loss, timeout), start a fresh one.
+      # workflow_dispatch from GITHUB_TOKEN is allowed to create a new run.
+      - name: "4"
+        if: failure() && (inputs.m || 'd') == 'd'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date -u +%s)" -lt "$(date -u -d 'today 08:50' +%s)" ]; then
+            gh workflow run run5.yml -R "$GITHUB_REPOSITORY" -f m=d && echo restarted
+          fi
