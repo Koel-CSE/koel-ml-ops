@@ -1,0 +1,74 @@
+# Scheduled ops runner, fifth instance — same pattern as run.yml/run2.yml
+# (deliberately minimal; real logic lives in the private repo, fetched at
+# run time via a scoped token; public output is terse stage markers only).
+# Weekday daytime cadence plus one manual mode with two date inputs.
+name: run5
+
+on:
+  workflow_dispatch:
+    inputs:
+      m:
+        description: "m"
+        required: false
+        default: "a"
+        type: choice
+        options: ["a", "b", "c"]
+      x:
+        description: "x"
+        required: false
+        default: ""
+        type: string
+      y:
+        description: "y"
+        required: false
+        default: ""
+        type: string
+  schedule:
+    - cron: "*/15 4-8 * * 1-5"
+    - cron: "0 9 * * 1-5"
+    - cron: "30 9 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run5
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: "1"
+        env:
+          KOEL_REPO_PAT: ${{ secrets.KOEL_REPO_PAT }}
+          KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${KOEL_REPO_PAT}@github.com/${KOEL_TARGET_REPO}.git" src > /dev/null 2>&1
+          test -f src/scripts/ci_prices.sh
+          echo ok
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: "2"
+        working-directory: src
+        run: pip install -e . > /dev/null 2>&1 && echo ok
+
+      - name: "3"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          M: ${{ inputs.m || (github.event.schedule == '30 9 * * 1-5' && 'b') || 'a' }}
+          X: ${{ inputs.x || '' }}
+          Y: ${{ inputs.y || '' }}
+        run: |
+          case "$M" in
+            a) bash scripts/ci_prices.sh poll ;;
+            b) bash scripts/ci_prices.sh eod ;;
+            c) bash scripts/ci_prices.sh backfill "$X" "$Y" ;;
+            *) echo "stage 0: failed"; exit 1 ;;
+          esac
