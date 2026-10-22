@@ -1,0 +1,65 @@
+# Manual one-off: encrypted archive of old price_snapshots before retention
+# drains them. Output is AES-256 encrypted with a key wrapped to an RSA public
+# key (private half held offline); the public log shows only row counts.
+name: run6
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "1"
+        run: pip install "psycopg[binary]" certifi > /dev/null 2>&1 && echo ok
+      - name: "2"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import os, certifi, gzip, psycopg
+          os.environ.setdefault("PGSSLROOTCERT", certifi.where())
+          q = "SELECT * FROM price_snapshots WHERE ts < now() - interval '13 days' ORDER BY id"
+          n = 0
+          with psycopg.connect(os.environ["DATABASE_URL"]) as c, gzip.open("a.csv.gz", "wb", 6) as f:
+              with c.cursor().copy(f"COPY ({q}) TO STDOUT WITH (FORMAT csv, HEADER true)") as cp:
+                  for chunk in cp:
+                      f.write(chunk); n += bytes(chunk).count(b"\n")
+              total = c.execute("SELECT count(*) FROM price_snapshots").fetchone()[0]
+          print(f"lines={n} table_total={total}")
+          PY
+          sha256sum a.csv.gz | cut -c1-16
+      - name: "3"
+        run: |
+          cat > k.pub <<'K'
+            -----BEGIN PUBLIC KEY-----
+            MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAp7qn3YYRoW/C2SUSGIfC
+            0qnaEX2txNmjD5ZycquiZnO51pj/JpszisJLtrvq956lxoVGSQhU0xda359Q4ltY
+            KW40kkqw/usCI2fe9ctIMh3AGaSK58oUtGQ+7BW80lSlLsYRKvV6pn7akr/YSsNr
+            D6UGWlP6u2nbcuXmZhZRROIDsZrXZ4T1syPrqLueoXdBaGa6Y6YRlNQLnFpndheh
+            LZONj9Wx0Wg8Qs1gIrk1DZnq7PtR2qnYtDI/5VEUFv7MKT4gbvLVUaFypzcNCNo2
+            ky1mSjcN1iQ+KAIVCaM58S1Zwjevenit0y7Vh0D57NErGql/PTfTM/q3HyWn/biH
+            3pKUhNLHB6YBp3OxWMHtoAlNduuuHjlHNlfdr4h3PFT5xoM5KnXipQQQURGavaHq
+            gbgyDyEllyRtCwIx9J3ytN6+a2SB+cCoYgNKdOQLHv/TFld/wpUfQ8e53nc+lsjD
+            47RK7uILvy2VgbQTz9hS8O+r+hhSy51CNUCdtRvZAIJJAgMBAAE=
+            -----END PUBLIC KEY-----
+          K
+          sed -i 's/^ *//' k.pub
+          k=$(openssl rand -hex 32)
+          printf '%s' "$k" | openssl pkeyutl -encrypt -pubin -inkey k.pub -out k.enc
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass "pass:$k" -in a.csv.gz -out a.enc
+          rm -f a.csv.gz; ls -l a.enc | awk '{print $5}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a
+          path: |
+            a.enc
+            k.enc
+          retention-days: 2
