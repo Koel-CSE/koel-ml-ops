@@ -12,7 +12,7 @@ on:
         required: false
         default: "a"
         type: choice
-        options: ["a", "b", "c", "d", "e"]
+        options: ["a", "b", "c", "d", "e", "f"]
       x:
         description: "x"
         required: false
@@ -44,7 +44,7 @@ concurrency:
 
 jobs:
   run:
-    if: inputs.m != 'e'
+    if: inputs.m != 'e' && inputs.m != 'f'
     runs-on: ubuntu-latest
     timeout-minutes: 345
     steps:
@@ -159,3 +159,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "a-${{ github.run_id }}" a.enc k.enc -R "$GITHUB_REPOSITORY" --prerelease -t a -n a > /dev/null && echo ok
+
+  # Read-only check: succeeds only if snapshots landed in >=15 distinct minutes
+  # of the last 30 (a 15s poller does; run5's 5-min loop alone cannot).
+  chk:
+    if: inputs.m == 'f'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "1"
+        run: pip install "psycopg[binary]" certifi > /dev/null 2>&1 && echo ok
+      - name: "2"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import os, sys, certifi, psycopg
+          os.environ.setdefault("PGSSLROOTCERT", certifi.where())
+          with psycopg.connect(os.environ["DATABASE_URL"]) as c:
+              n = c.execute("SELECT count(DISTINCT date_trunc('minute', ingested_at)) FROM price_snapshots WHERE ingested_at > now() - interval '30 minutes'").fetchone()[0]
+          print(f"minutes={n}")
+          sys.exit(0 if n >= 15 else 1)
+          PY
