@@ -1,0 +1,66 @@
+name: index-data
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Koel source ref (use its prepared PR branch for validation)
+        required: false
+        default: main
+  schedule:
+    # 16:10 Asia/Colombo, after the normal market close. Data only.
+    - cron: "40 10 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: index-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.event_name == 'workflow_dispatch' || vars.KOEL_OPS_PAUSE != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate required configuration
+        env:
+          READ_TOKEN: ${{ secrets.KOEL_REPO_PAT || secrets.KOEL_STATUS_PAT }}
+          TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${READ_TOKEN}" ]; then
+            echo "::error::Set KOEL_REPO_PAT with Contents read access (KOEL_STATUS_PAT is a fallback)."
+            exit 1
+          fi
+          if [ -z "${TARGET_REPO}" ]; then
+            echo "::error::Set KOEL_TARGET_REPO to the Koel source repository."
+            exit 1
+          fi
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::Set DATABASE_URL to the active Koel datastore."
+            exit 1
+          fi
+      - name: Read Koel source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.KOEL_TARGET_REPO }}
+          token: ${{ secrets.KOEL_REPO_PAT || secrets.KOEL_STATUS_PAT }}
+          ref: ${{ inputs.target_ref || 'main' }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install data dependencies
+        run: pip install -e .
+      - name: Restore official index history
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CSE_MIN_INTERVAL_SECONDS: "0.5"
+        run: python -m koel aspi-backfill --force
+      - name: Verify trading-date coverage and freshness
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m koel.index_history --lookback-days 45 --max-age-days 7
