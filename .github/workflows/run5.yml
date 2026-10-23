@@ -12,7 +12,7 @@ on:
         required: false
         default: "a"
         type: choice
-        options: ["a", "b", "c", "d", "e", "f"]
+        options: ["a", "b", "c", "d", "e", "f", "g"]
       x:
         description: "x"
         required: false
@@ -41,7 +41,7 @@ concurrency:
 
 jobs:
   run:
-    if: inputs.m != 'e' && inputs.m != 'f'
+    if: inputs.m != 'e' && inputs.m != 'f' && inputs.m != 'g'
     runs-on: ubuntu-latest
     timeout-minutes: 345
     steps:
@@ -156,6 +156,61 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "a-${{ github.run_id }}" a.enc k.enc -R "$GITHUB_REPOSITORY" --prerelease -t a -n a > /dev/null && echo ok
+
+  # Read-only ML snapshot export (SELECT only), encrypted before upload.
+  snap:
+    if: inputs.m == 'g'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: "1"
+        env:
+          KOEL_REPO_PAT: ${{ secrets.KOEL_REPO_PAT }}
+          KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${KOEL_REPO_PAT}@github.com/${KOEL_TARGET_REPO}.git" src > /dev/null 2>&1
+          echo ok
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "2"
+        working-directory: src
+        run: pip install -e . certifi > /dev/null 2>&1 && echo ok
+      - name: "3a"
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          D: ${{ inputs.x || 'hybrid' }}
+        run: |
+          export PGSSLROOTCERT=$(python -c "import certifi;print(certifi.where())")
+          python -m koel.ml.snapshot export --dataset "$D" --price-adjustment split --output ../snap > ../log.txt 2>&1 || { tail -c 400 ../log.txt | grep -oiE "error[a-z]*|[A-Za-z]+Error" | sort -u; exit 1; }
+          cd .. && tar czf s.tgz snap && ls -l s.tgz | awk '{print $5}'
+      - name: "3"
+        run: |
+          cat > k.pub <<'K'
+            -----BEGIN PUBLIC KEY-----
+            MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAp7qn3YYRoW/C2SUSGIfC
+            0qnaEX2txNmjD5ZycquiZnO51pj/JpszisJLtrvq956lxoVGSQhU0xda359Q4ltY
+            KW40kkqw/usCI2fe9ctIMh3AGaSK58oUtGQ+7BW80lSlLsYRKvV6pn7akr/YSsNr
+            D6UGWlP6u2nbcuXmZhZRROIDsZrXZ4T1syPrqLueoXdBaGa6Y6YRlNQLnFpndheh
+            LZONj9Wx0Wg8Qs1gIrk1DZnq7PtR2qnYtDI/5VEUFv7MKT4gbvLVUaFypzcNCNo2
+            ky1mSjcN1iQ+KAIVCaM58S1Zwjevenit0y7Vh0D57NErGql/PTfTM/q3HyWn/biH
+            3pKUhNLHB6YBp3OxWMHtoAlNduuuHjlHNlfdr4h3PFT5xoM5KnXipQQQURGavaHq
+            gbgyDyEllyRtCwIx9J3ytN6+a2SB+cCoYgNKdOQLHv/TFld/wpUfQ8e53nc+lsjD
+            47RK7uILvy2VgbQTz9hS8O+r+hhSy51CNUCdtRvZAIJJAgMBAAE=
+            -----END PUBLIC KEY-----
+          K
+          sed -i 's/^ *//' k.pub
+          k=$(openssl rand -hex 32)
+          printf '%s' "$k" | openssl pkeyutl -encrypt -pubin -inkey k.pub -out k.enc
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass "pass:$k" -in s.tgz -out a.enc
+          rm -f s.tgz; ls -l a.enc | awk '{print $5}'
+      - name: "4"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "s-${{ github.run_id }}" a.enc k.enc -R "$GITHUB_REPOSITORY" --prerelease -t a -n a > /dev/null && echo ok
 
   # Read-only check: succeeds only if snapshots landed in >=15 distinct minutes
   # of the last 30 (a 15s poller does; run5's 5-min loop alone cannot).
