@@ -181,7 +181,7 @@ jobs:
       - name: "3a"
         working-directory: src
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ML_DATABASE_URL: ${{ secrets.ML_DATABASE_URL }}
           D: ${{ inputs.x || 'hybrid' }}
         run: |
           export PGSSLROOTCERT=$(python -c "import certifi;print(certifi.where())")
