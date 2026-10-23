@@ -23,16 +23,13 @@ on:
         required: false
         default: ""
         type: string
-  # GitHub drops/delays most cron fires on this repo (15-min crons fire every
-  # ~2-3h), so one fire starts a session-long loop (mode d) instead of relying
-  # on many short runs. Several fires as backups; extras queue and no-op.
+  # Deno (15s poller) owns intraday polling since 2026-10-23. Scheduled runs
+  # only write EOD bars (mode b, idempotent). Several fires as backups because
+  # GitHub delays cron on this repo (15:00-16:30 SLT).
   schedule:
-    - cron: "50 3 * * 1-5"
-    - cron: "20 4 * * 1-5"
-    - cron: "0 5 * * 1-5"
-    - cron: "0 6 * * 1-5"
-    - cron: "0 7 * * 1-5"
-    - cron: "0 8 * * 1-5"
+    - cron: "30 9 * * 1-5"
+    - cron: "0 10 * * 1-5"
+    - cron: "0 11 * * 1-5"
 
 permissions:
   contents: read
@@ -70,7 +67,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          M: ${{ inputs.m || 'd' }}
+          M: ${{ inputs.m || 'b' }}
           X: ${{ inputs.x || '' }}
           Y: ${{ inputs.y || '' }}
         run: |
