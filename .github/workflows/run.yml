@@ -68,7 +68,13 @@ jobs:
         run: |
           pip install -e ".[dev,ml]" > /dev/null 2>&1 && echo ok
 
+      # Steps 3-5 are independent. The scripts they call keep running after
+      # a failed stage and can still exit 0, so each step also fails when
+      # a "stage N: failed" marker appears. continue-on-error lets later
+      # steps still run; step 6 then fails the job if any of them failed.
       - name: "3"
+        id: s3
+        continue-on-error: true
         working-directory: src
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -81,16 +87,57 @@ jobs:
           FORECAST_MODE: ${{ github.event.inputs.opt_d || 'hpe_with_ltr_fallback' }}
           COPILOT_TASK_PAT: ${{ secrets.COPILOT_TASK_PAT }}
           KOEL_TARGET_REPO: ${{ secrets.KOEL_TARGET_REPO }}
-        run: bash scripts/ci_ml_self_learn.sh
+        shell: bash
+        run: |
+          rc=0
+          bash scripts/ci_ml_self_learn.sh | tee "$RUNNER_TEMP/run-3.out" || rc=$?
+          if [ "$rc" -ne 0 ] || grep -Eq '^stage [0-9]+: failed$' "$RUNNER_TEMP/run-3.out"; then
+            echo "::error::step 3 failed (exit $rc)"
+            exit 1
+          fi
 
       - name: "4"
+        id: s4
+        continue-on-error: true
         working-directory: src
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: bash scripts/ci_resolve_verdicts.sh
+        shell: bash
+        run: |
+          rc=0
+          bash scripts/ci_resolve_verdicts.sh | tee "$RUNNER_TEMP/run-4.out" || rc=$?
+          if [ "$rc" -ne 0 ] || grep -Eq '^stage [0-9]+: failed$' "$RUNNER_TEMP/run-4.out"; then
+            echo "::error::step 4 failed (exit $rc)"
+            exit 1
+          fi
 
       - name: "5"
+        id: s5
+        continue-on-error: true
         working-directory: src
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: bash scripts/ci_signal_ic_report.sh
+        shell: bash
+        run: |
+          rc=0
+          bash scripts/ci_signal_ic_report.sh | tee "$RUNNER_TEMP/run-5.out" || rc=$?
+          if [ "$rc" -ne 0 ] || grep -Eq '^stage [0-9]+: failed$' "$RUNNER_TEMP/run-5.out"; then
+            echo "::error::step 5 failed (exit $rc)"
+            exit 1
+          fi
+
+      - name: "6"
+        if: always()
+        env:
+          S3: ${{ steps.s3.outcome }}
+          S4: ${{ steps.s4.outcome }}
+          S5: ${{ steps.s5.outcome }}
+        run: |
+          failed=0
+          for s in "3:$S3" "4:$S4" "5:$S5"; do
+            if [ "${s#*:}" = "failure" ]; then
+              echo "::error::step ${s%%:*} failed"
+              failed=1
+            fi
+          done
+          exit "$failed"
